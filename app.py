@@ -1,118 +1,147 @@
+# ============================================================
+# AgriRAG - Farmer-Friendly Agricultural RAG Assistant
+# ============================================================
+
 import streamlit as st
 
-from answer import generate_answer
-from rerank_search import search
+from query_context import build_context_query
+
+from answer import (
+    generate_answer,
+    get_verified_sources,
+    is_knowledge_gap,
+    KNOWLEDGE_GAP_MESSAGE
+)
+
+from search import search
 
 
-# =========================================================
-# PAGE CONFIG
-# =========================================================
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
-    page_title="KrishiJal AI",
-    page_icon="🌱",
+    page_title="AgriRAG",
+    page_icon="🌾",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 
-# =========================================================
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "pending_question" not in st.session_state:
+    st.session_state.pending_question = None
+
+
+# ============================================================
 # CUSTOM CSS
-# =========================================================
+# ============================================================
 
 st.markdown(
     """
     <style>
 
-    /* Main page */
+    /* =====================================================
+       GLOBAL
+       ===================================================== */
+
     .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        max-width: 1400px;
+        max-width: 1250px;
+        padding-top: 1.5rem;
+        padding-bottom: 5rem;
     }
 
-    /* Header */
-    .hero {
-        padding: 10px 0 25px 0;
+    body {
+        font-family: sans-serif;
     }
 
-    .hero-title {
-        font-size: 44px;
+
+    /* =====================================================
+       BRAND
+       ===================================================== */
+
+    .brand-title {
+        font-size: 3rem;
         font-weight: 800;
-        letter-spacing: -1px;
-        margin: 0;
+        line-height: 1.05;
+        margin-bottom: 0.15rem;
     }
 
-    .hero-subtitle {
-        font-size: 18px;
-        margin-top: 6px;
-        color: #9ca3af;
+    .brand-subtitle {
+        font-size: 1.05rem;
+        color: #7d8793;
+        margin-bottom: 1.2rem;
     }
 
-    /* Context card */
-    .context-card {
-        border: 1px solid rgba(255,255,255,0.10);
-        border-radius: 14px;
-        padding: 16px;
-        margin-bottom: 18px;
-        background: rgba(255,255,255,0.03);
-    }
 
-    /* Source card */
-    .source-card {
-        border: 1px solid rgba(100,200,140,0.25);
-        border-radius: 12px;
-        padding: 14px 16px;
-        margin: 8px 0;
-        background: rgba(100,200,140,0.06);
-    }
+    /* =====================================================
+       SIDEBAR
+       ===================================================== */
 
-    .source-title {
-        font-weight: 700;
-        font-size: 15px;
-    }
-
-    .source-meta {
-        color: #aeb7c2;
-        font-size: 13px;
-        margin-top: 5px;
-    }
-
-    /* Feature cards */
-    .feature-card {
-        border: 1px solid rgba(255,255,255,0.09);
-        border-radius: 12px;
-        padding: 18px;
-        height: 100%;
-        background: rgba(255,255,255,0.025);
-    }
-
-    .feature-title {
-        font-size: 15px;
-        font-weight: 700;
-    }
-
-    .feature-text {
-        color: #9ca3af;
-        font-size: 13px;
-        margin-top: 5px;
-    }
-
-    /* Status badge */
-    .status {
-        display: inline-block;
-        padding: 5px 10px;
-        border-radius: 20px;
-        background: rgba(80,200,120,0.12);
-        color: #70d990;
-        font-size: 12px;
-        font-weight: 600;
-        margin-bottom: 12px;
-    }
-
-    /* Sidebar */
     section[data-testid="stSidebar"] {
-        border-right: 1px solid rgba(255,255,255,0.08);
+        border-right: 1px solid rgba(128, 128, 128, 0.15);
+    }
+
+    section[data-testid="stSidebar"] .block-container {
+        padding-top: 1.2rem;
+    }
+
+
+    /* =====================================================
+       METRICS
+       ===================================================== */
+
+    [data-testid="stMetric"] {
+        border: 1px solid rgba(128, 128, 128, 0.16);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: rgba(128, 128, 128, 0.03);
+    }
+
+    [data-testid="stMetricLabel"] {
+        font-size: 0.76rem !important;
+    }
+
+    [data-testid="stMetricValue"] {
+        font-size: 1.1rem !important;
+    }
+
+
+    /* =====================================================
+       BUTTONS
+       ===================================================== */
+
+    .stButton > button {
+        border-radius: 10px;
+        min-height: 46px;
+        font-weight: 600;
+    }
+
+
+    /* =====================================================
+       CHAT
+       ===================================================== */
+
+    [data-testid="stChatMessage"] {
+        border-radius: 12px;
+    }
+
+
+    /* =====================================================
+       FOOTER
+       ===================================================== */
+
+    .footer {
+        text-align: center;
+        color: #7d8793;
+        font-size: 0.78rem;
+        padding-top: 0.5rem;
     }
 
     </style>
@@ -121,41 +150,53 @@ st.markdown(
 )
 
 
-# =========================================================
+# ============================================================
 # HEADER
-# =========================================================
+# ============================================================
 
 st.markdown(
-    """
-    <div class="hero">
-        <div class="status">● AI AGRICULTURAL KNOWLEDGE ASSISTANT</div>
-
-        <div class="hero-title">
-            🌱 KrishiJal AI
-        </div>
-
-        <div class="hero-subtitle">
-            Evidence-grounded irrigation and crop water management assistant
-        </div>
-    </div>
-    """,
+    '<div class="brand-title">🌾 AgriRAG</div>',
     unsafe_allow_html=True
 )
 
+st.markdown(
+    '<div class="brand-subtitle">'
+    'Intelligent agricultural knowledge assistant'
+    '</div>',
+    unsafe_allow_html=True
+)
 
-# =========================================================
+st.info(
+    "🌱 Ask about irrigation, crop water management, "
+    "water-saving practices, irrigation methods, and crop stages. "
+    "AgriRAG answers from the indexed agricultural documents."
+)
+
+
+# ============================================================
 # SIDEBAR
-# =========================================================
+# ============================================================
 
 with st.sidebar:
 
-    st.markdown("## 🌾 Farmer Profile")
+    st.header("🌾 Farmer Profile")
+
+    st.caption(
+        "Select what you know. You can also simply mention "
+        "these details in your question."
+    )
+
+
+    # --------------------------------------------------------
+    # Crop
+    # --------------------------------------------------------
 
     crop = st.selectbox(
-        "Crop",
+        "🌱 Crop",
         [
             "Not specified",
             "Rice",
+            "Tomato",
             "Wheat",
             "Maize",
             "Sugarcane",
@@ -166,20 +207,31 @@ with st.sidebar:
         ]
     )
 
+
+    # --------------------------------------------------------
+    # Growth stage
+    # --------------------------------------------------------
+
     growth_stage = st.selectbox(
-        "Growth Stage",
+        "🌿 Growth Stage",
         [
             "Not specified",
             "Seedling",
             "Vegetative",
             "Flowering",
+            "Fruit-set",
             "Grain filling",
             "Maturity"
         ]
     )
 
+
+    # --------------------------------------------------------
+    # Current irrigation
+    # --------------------------------------------------------
+
     irrigation_method = st.selectbox(
-        "Irrigation Method",
+        "💧 Current Irrigation",
         [
             "Not specified",
             "Flood irrigation",
@@ -190,127 +242,133 @@ with st.sidebar:
         ]
     )
 
+
+    # --------------------------------------------------------
+    # Water availability
+    # --------------------------------------------------------
+
     water_availability = st.selectbox(
-        "Water Availability",
+        "🚰 Water Availability",
         [
             "Not specified",
             "Abundant",
             "Moderate",
-            "Limited"
+            "Low",
+            "Severely limited"
         ]
     )
+
+
+    # --------------------------------------------------------
+    # Language
+    # --------------------------------------------------------
 
     language = st.selectbox(
-        "Language",
+        "🗣️ Response Language",
         [
-            "English"
+            "English",
+            "Tamil"
         ]
     )
 
-    st.divider()
-
-    st.markdown("### 🧠 AI Pipeline")
-
-    st.write("✅ Semantic Retrieval")
-    st.write("✅ BM25 Retrieval")
-    st.write("✅ Hybrid RRF")
-    st.write("✅ BGE Reranking")
-    st.write("✅ Grounded LLM")
-    st.write("✅ Source Verification")
 
     st.divider()
+
+
+    # --------------------------------------------------------
+    # Pipeline
+    # --------------------------------------------------------
+
+    st.subheader("🧠 How AgriRAG Works")
+
+    st.write("1️⃣ Understand farmer context")
+    st.write("2️⃣ Semantic search")
+    st.write("3️⃣ Keyword search")
+    st.write("4️⃣ RRF fusion")
+    st.write("5️⃣ Evidence reranking")
+    st.write("6️⃣ Grounded answer")
+
+
+    st.divider()
+
 
     st.caption(
-        "Answers are generated only from the indexed agricultural documents."
+        "AgriRAG does not invent unsupported "
+        "agricultural information."
     )
 
 
-# =========================================================
-# FARMER CONTEXT
-# =========================================================
+# ============================================================
+# SIDEBAR CONTEXT
+# ============================================================
 
-context = f"""
-Crop: {crop}
-Growth Stage: {growth_stage}
-Irrigation Method: {irrigation_method}
-Water Availability: {water_availability}
-Language: {language}
-"""
-
-
-# =========================================================
-# FEATURE CARDS
-# =========================================================
-
-st.markdown("### 💡 Ask KrishiJal")
-
-col1, col2, col3 = st.columns(3)
-
-selected_question = None
+sidebar_context = {
+    "crop": crop,
+    "growth_stage": growth_stage,
+    "irrigation_method": irrigation_method,
+    "water_availability": water_availability
+}
 
 
-with col1:
+# ============================================================
+# QUICK QUESTIONS
+# ============================================================
+
+st.subheader("💡 Quick Questions")
+
+q1, q2, q3 = st.columns(3)
+
+
+with q1:
 
     if st.button(
         "💧 Irrigation Scheduling",
         use_container_width=True
     ):
 
-        selected_question = (
+        st.session_state.pending_question = (
             "What are the principles of irrigation scheduling?"
         )
 
 
-with col2:
+with q2:
 
     if st.button(
-        "🌾 Crop Water Management",
+        "🌱 Crop Water Management",
         use_container_width=True
     ):
 
-        selected_question = (
-            f"What water management practices are recommended "
-            f"for {crop}?"
-        )
+        if crop == "Not specified":
+
+            st.session_state.pending_question = (
+                "What crop water management practices "
+                "are discussed in the available documents?"
+            )
+
+        else:
+
+            st.session_state.pending_question = (
+                f"What crop water management practices "
+                f"are discussed for {crop}?"
+            )
 
 
-with col3:
+with q3:
 
     if st.button(
-        "♻️ Water Saving",
+        "♻️ Save Water",
         use_container_width=True
     ):
 
-        selected_question = (
-            "What practices can improve irrigation water-use efficiency?"
+        st.session_state.pending_question = (
+            "What practices can improve irrigation "
+            "water-use efficiency?"
         )
 
 
-# =========================================================
-# CHAT INPUT
-# =========================================================
-
-chat_question = st.chat_input(
-    "Ask an irrigation or crop water-management question..."
-)
-
-if chat_question:
-
-    selected_question = chat_question
-
-
-# =========================================================
-# SESSION STATE
-# =========================================================
-
-if "messages" not in st.session_state:
-
-    st.session_state.messages = []
-
-
-# =========================================================
-# DISPLAY CHAT HISTORY
-# =========================================================
+# ============================================================
+# CHAT HISTORY
+# ============================================================
 
 for message in st.session_state.messages:
 
@@ -323,215 +381,313 @@ for message in st.session_state.messages:
         )
 
 
-# =========================================================
+# ============================================================
+# CHAT INPUT
+# ============================================================
+
+typed_question = st.chat_input(
+    "Ask your farming question here..."
+)
+
+
+if typed_question:
+
+    st.session_state.pending_question = typed_question
+
+
+# ============================================================
+# GET QUESTION
+# ============================================================
+
+question = st.session_state.pending_question
+
+
+# ============================================================
 # PROCESS QUESTION
-# =========================================================
+# ============================================================
 
-if selected_question:
+if question:
 
-    full_question = f"""
-FARMER CONTEXT
+    # --------------------------------------------------------
+    # Prevent duplicate processing
+    # --------------------------------------------------------
 
-{context}
-
-QUESTION
-
-{selected_question}
-"""
+    st.session_state.pending_question = None
 
 
-    # -----------------------------------------------------
-    # USER MESSAGE
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # AUTOMATIC CONTEXT EXTRACTION
+    # --------------------------------------------------------
+
+    detected_context, retrieval_query = (
+        build_context_query(
+            question,
+            sidebar_context
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # STORE USER MESSAGE
+    # --------------------------------------------------------
 
     st.session_state.messages.append(
         {
             "role": "user",
-            "content": selected_question
+            "content": question
         }
     )
 
 
+    # --------------------------------------------------------
+    # SHOW USER QUESTION
+    # --------------------------------------------------------
+
     with st.chat_message("user"):
 
         st.markdown(
-            selected_question
+            question
         )
 
 
-        with st.expander(
-            "🌾 Farmer context"
-        ):
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.write(
-                    f"**Crop:** {crop}"
-                )
-
-                st.write(
-                    f"**Growth stage:** {growth_stage}"
-                )
-
-            with col2:
-                st.write(
-                    f"**Irrigation:** {irrigation_method}"
-                )
-
-                st.write(
-                    f"**Water:** {water_availability}"
-                )
-
-
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # ASSISTANT
-    # -----------------------------------------------------
+    # --------------------------------------------------------
 
     with st.chat_message("assistant"):
 
         try:
 
+            # =================================================
+            # DETECTED CONTEXT
+            # =================================================
+
+            st.subheader(
+                "🧠 What AgriRAG understood"
+            )
+
+            st.caption(
+                "Automatically detected from your question "
+                "and combined with your farmer profile."
+            )
+
+
+            # -------------------------------------------------
+            # First row
+            # -------------------------------------------------
+
+            c1, c2, c3 = st.columns(3)
+
+
+            with c1:
+
+                st.metric(
+                    "🌾 Crop",
+                    detected_context.get(
+                        "crop"
+                    )
+                    or "Not specified"
+                )
+
+
+            with c2:
+
+                st.metric(
+                    "🌿 Growth Stage",
+                    detected_context.get(
+                        "growth_stage"
+                    )
+                    or "Not specified"
+                )
+
+
+            with c3:
+
+                st.metric(
+                    "🎯 Intent",
+                    detected_context.get(
+                        "intent"
+                    )
+                    or "General"
+                )
+
+
+            # -------------------------------------------------
+            # Second row
+            # -------------------------------------------------
+
+            c4, c5 = st.columns(2)
+
+
+            with c4:
+
+                st.metric(
+                    "💧 Irrigation Method",
+                    detected_context.get(
+                        "irrigation_method"
+                    )
+                    or "Not specified"
+                )
+
+
+            with c5:
+
+                st.metric(
+                    "🚰 Water Availability",
+                    detected_context.get(
+                        "water_availability"
+                    )
+                    or "Not specified"
+                )
+
+
+            st.divider()
+
+
+            # =================================================
+            # SEARCH
+            # =================================================
+
             with st.spinner(
-                "🔎 Retrieving agricultural evidence..."
+                "🔎 Finding the most relevant evidence..."
             ):
 
                 results = search(
-                    full_question,
-                    candidate_k=20,
-                    final_k=5
+                    retrieval_query,
+                    top_k=3
                 )
 
 
-            # -------------------------------------------------
+            # =================================================
             # NO EVIDENCE
-            # -------------------------------------------------
+            # =================================================
 
             if not results:
 
-                answer = (
-                    "I don't have enough information "
-                    "in the provided documents to answer this."
+                st.warning(
+                    "⚠️ I couldn't find sufficiently relevant "
+                    "information in the indexed documents."
                 )
+
+
+                answer = (
+                    KNOWLEDGE_GAP_MESSAGE
+                )
+
+
+                st.write(
+                    answer
+                )
+
 
             else:
 
+                # =================================================
+                # GENERATION
+                # =================================================
+
                 with st.spinner(
-                    "🤖 Generating grounded answer..."
+                    "🤖 Preparing your answer..."
                 ):
 
                     answer = generate_answer(
-                        full_question,
-                        results
+                        retrieval_query,
+                        results,
+                        language=language
                     )
 
 
-            # -------------------------------------------------
-            # ANSWER
-            # -------------------------------------------------
-
-            st.markdown(
-                answer
-            )
-
-
-            # -------------------------------------------------
-            # KNOWLEDGE GAP DETECTION
-            # -------------------------------------------------
-
-            knowledge_gap = (
-                "I don't have enough information"
-                in answer
-            )
-
-
-            # -------------------------------------------------
-            # VERIFIED SOURCES
-            # -------------------------------------------------
-
-            if results and not knowledge_gap:
-
-                st.markdown(
-                    "### 📚 Verified Sources"
+                knowledge_gap = is_knowledge_gap(
+                    answer
                 )
 
-                seen = set()
 
-                displayed_sources = 0
+                # =================================================
+                # ANSWER
+                # =================================================
 
-                for result in results:
-
-                    key = (
-                        result["document"],
-                        result["page"],
-                        result["section"]
-                    )
-
-                    if key in seen:
-                        continue
-
-                    seen.add(key)
-
-                    displayed_sources += 1
-
-                    document = result["document"]
-
-                    page = result["page"]
-
-                    section = result["section"]
-
-                    subsection = result["subsection"]
+                st.subheader(
+                    "🌱 AgriRAG Answer"
+                )
 
 
-                    if not section:
+                if knowledge_gap:
 
-                        section = "General content"
-
-
-                    subsection_text = ""
-
-                    if subsection:
-
-                        subsection_text = (
-                            f" • {subsection}"
-                        )
-
-
-                    st.markdown(
-                        f"""
-                        <div class="source-card">
-
-                            <div class="source-title">
-                                📄 {document}
-                            </div>
-
-                            <div class="source-meta">
-                                Page {page}
-                                • {section}
-                                {subsection_text}
-                            </div>
-
-                        </div>
-                        """,
-                        unsafe_allow_html=True
+                    st.warning(
+                        "⚠️ The available documents do not "
+                        "fully document the requested information."
                     )
 
 
-                if displayed_sources == 0:
+                st.markdown(
+                    answer
+                )
+
+
+                # =================================================
+                # VERIFIED SOURCES
+                # =================================================
+
+                sources = get_verified_sources(
+                    results
+                )
+
+
+                if sources:
+
+                    st.divider()
+
+                    st.subheader(
+                        "📚 Sources Used"
+                    )
 
                     st.caption(
-                        "No verified source was available for this answer."
+                        "Documents that provided the evidence "
+                        "for this response."
                     )
 
 
-            # -------------------------------------------------
-            # RETRIEVED EVIDENCE
-            # -------------------------------------------------
+                    for source in sources:
 
-            if results:
+                        with st.container(
+                            border=True
+                        ):
+
+                            st.markdown(
+                                f"📄 **{source['document']}**"
+                            )
+
+
+                            metadata = (
+                                f"Page {source['page']} "
+                                f"• "
+                                f"{source.get('section') or 'General content'}"
+                            )
+
+
+                            if source.get(
+                                "subsection"
+                            ):
+
+                                metadata += (
+                                    f" • "
+                                    f"{source['subsection']}"
+                                )
+
+
+                            st.caption(
+                                metadata
+                            )
+
+
+                # =================================================
+                # SUPPORTING EVIDENCE
+                # =================================================
+
+                st.divider()
 
                 with st.expander(
-                    "🔎 View retrieved evidence"
+                    "🔎 View supporting evidence"
                 ):
 
                     for i, result in enumerate(
@@ -540,26 +696,61 @@ QUESTION
                     ):
 
                         st.markdown(
-                            f"**Evidence {i}**"
+                            f"### Evidence {i}"
                         )
+
 
                         st.caption(
-                            f"Page {result['page']} | "
-                            f"{result['section'] or 'General content'} | "
-                            f"Score: "
-                            f"{result.get('final_score', 0):.3f}"
+                            f"{result.get('document', 'Unknown document')} "
+                            f"• Page {result.get('page', 'Unknown')} "
+                            f"• "
+                            f"{result.get('section') or 'General content'}"
                         )
+
 
                         st.write(
-                            result["text"]
+                            result.get(
+                                "text",
+                                ""
+                            )
                         )
 
-                        st.divider()
+
+                        if i < len(results):
+
+                            st.divider()
 
 
-            # -------------------------------------------------
-            # SAVE ASSISTANT MESSAGE
-            # -------------------------------------------------
+                # =================================================
+                # TECHNICAL DETAILS
+                # =================================================
+
+                with st.expander(
+                    "⚙️ View detected context & search details"
+                ):
+
+                    st.markdown(
+                        "#### Detected Context"
+                    )
+
+                    st.json(
+                        detected_context
+                    )
+
+
+                    st.markdown(
+                        "#### Retrieval Query"
+                    )
+
+                    st.code(
+                        retrieval_query,
+                        language="text"
+                    )
+
+
+            # =================================================
+            # STORE ASSISTANT RESPONSE
+            # =================================================
 
             st.session_state.messages.append(
                 {
@@ -569,26 +760,62 @@ QUESTION
             )
 
 
-        except Exception as e:
+        except Exception as exc:
 
             st.error(
-                f"Something went wrong: {e}"
+                "AgriRAG encountered an error."
+            )
+
+            st.exception(
+                exc
             )
 
 
-# =========================================================
+# ============================================================
+# EMPTY STATE
+# ============================================================
+
+if not st.session_state.messages:
+
+    st.divider()
+
+    st.subheader(
+        "👋 How can AgriRAG help?"
+    )
+
+    st.write(
+        "Try asking a question such as:"
+    )
+
+    st.markdown(
+        """
+        **🌱 “My tomato crop is flowering and water availability
+        is low. What irrigation method should I use?”**
+
+        **💧 “How can I improve irrigation water-use efficiency?”**
+
+        **📅 “What are the principles of irrigation scheduling?”**
+
+        **🚰 “How can farmers save water using micro-irrigation?”**
+        """
+    )
+
+
+# ============================================================
 # FOOTER
-# =========================================================
+# ============================================================
 
 st.divider()
 
 st.markdown(
     """
-    <div style="text-align:center; color:#777; font-size:13px;">
-        🌱 KrishiJal AI &nbsp;•&nbsp;
-        Retrieval-Augmented Agricultural Intelligence &nbsp;•&nbsp;
-        Evidence-grounded responses
+    <div class="footer">
+        🌾 <b>AgriRAG</b>
+        &nbsp;•&nbsp;
+        Evidence-grounded Agricultural Intelligence
+        &nbsp;•&nbsp;
+        Retrieval-Augmented Generation
     </div>
     """,
     unsafe_allow_html=True
-)
+)   

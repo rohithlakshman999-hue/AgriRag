@@ -1,98 +1,167 @@
+# ============================================================
+# KrishiJal AI - Hybrid Retrieval + Cross-Encoder Reranking
+# ============================================================
+#
+# Pipeline:
+#
+# Farmer Question
+#       ↓
+# Context-aware query
+#       ↓
+# Semantic Search (FAISS)
+#       +
+# Keyword Search (BM25)
+#       ↓
+# RRF Fusion
+#       ↓
+# Cross-Encoder Reranking
+#       ↓
+# Section Boost
+#       ↓
+# Final Evidence
+#
+# ============================================================
+
 import pickle
+
 import faiss
 import numpy as np
 
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from sentence_transformers import (
+    SentenceTransformer,
+    CrossEncoder
+)
+
+from rank_bm25 import BM25Okapi
+
 from section_router import route_query
 
 
-# =========================================================
-# FILE PATHS
-# =========================================================
+# ============================================================
+# FILES
+# ============================================================
 
-CHUNKS_FILE = "data/processed/chunks.pkl"
-FAISS_FILE = "data/processed/faiss.index"
-BM25_FILE = "data/processed/bm25.pkl"
+CHUNKS_FILE = (
+    "data/processed/chunks.pkl"
+)
 
+FAISS_FILE = (
+    "data/processed/faiss.index"
+)
 
-# =========================================================
-# MODELS
-# =========================================================
-
-EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
-RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
-
-
-# =========================================================
-# SETTINGS
-# =========================================================
-
-CANDIDATE_K = 20
-FINAL_K = 5
-
-# This is only a ranking preference.
-SECTION_BOOST = 0.20
-
-# Minimum score used to remove obviously weak results.
-MIN_FINAL_SCORE = 0.50
-
-
-# =========================================================
-# LOAD CHUNKS
-# =========================================================
-
-print("Loading chunks...")
-
-with open(CHUNKS_FILE, "rb") as f:
-    chunks = pickle.load(f)
-
-print(f"Loaded {len(chunks)} chunks.")
-
-
-# =========================================================
-# LOAD FAISS INDEX
-# =========================================================
-
-print("\nLoading FAISS index...")
-
-faiss_index = faiss.read_index(FAISS_FILE)
-
-print(
-    f"FAISS contains {faiss_index.ntotal} vectors."
+BM25_FILE = (
+    "data/processed/bm25.pkl"
 )
 
 
-# =========================================================
+# ============================================================
+# MODELS
+# ============================================================
+
+EMBEDDING_MODEL = (
+    "BAAI/bge-base-en-v1.5"
+)
+
+RERANKER_MODEL = (
+    "BAAI/bge-reranker-v2-m3"
+)
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+CANDIDATE_K = 15
+
+FINAL_K = 3
+
+RRF_K = 60
+
+SECTION_BOOST = 0.10
+
+# IMPORTANT:
+# Do not use an aggressive 0.50 threshold for the
+# cross-encoder score.
+#
+# We only discard extremely weak evidence.
+MIN_FINAL_SCORE = -1.0
+
+
+# ============================================================
+# LOAD CHUNKS
+# ============================================================
+
+print("=" * 70)
+print("KRISHIJAL AI - RERANK SEARCH")
+print("=" * 70)
+
+print("\nLoading chunks...")
+
+with open(
+    CHUNKS_FILE,
+    "rb"
+) as f:
+
+    chunks = pickle.load(f)
+
+
+print(
+    f"Loaded {len(chunks)} chunks."
+)
+
+
+# ============================================================
+# LOAD FAISS
+# ============================================================
+
+print("\nLoading FAISS index...")
+
+faiss_index = faiss.read_index(
+    FAISS_FILE
+)
+
+print(
+    f"FAISS contains "
+    f"{faiss_index.ntotal} vectors."
+)
+
+
+# ============================================================
 # SAFETY CHECK
-# =========================================================
+# ============================================================
 
 if faiss_index.ntotal != len(chunks):
 
     raise RuntimeError(
         "\nINDEX MISMATCH!\n"
         f"chunks.pkl : {len(chunks)} chunks\n"
-        f"faiss.index : {faiss_index.ntotal} vectors\n\n"
-        "Rebuild the index using:\n"
+        f"faiss.index : "
+        f"{faiss_index.ntotal} vectors\n\n"
+        "Run:\n"
         "python ingest.py\n"
         "python build_index.py"
     )
 
 
-# =========================================================
+# ============================================================
 # LOAD BM25
-# =========================================================
+# ============================================================
 
 print("\nLoading BM25 index...")
 
-with open(BM25_FILE, "rb") as f:
+with open(
+    BM25_FILE,
+    "rb"
+) as f:
+
     bm25 = pickle.load(f)
 
 print("BM25 loaded.")
 
 
-# =========================================================
+# ============================================================
 # LOAD EMBEDDING MODEL
-# =========================================================
+# ============================================================
 
 print("\nLoading embedding model...")
 
@@ -100,150 +169,367 @@ embedding_model = SentenceTransformer(
     EMBEDDING_MODEL
 )
 
-print("Embedding model loaded.")
+print(
+    f"Embedding model loaded: "
+    f"{EMBEDDING_MODEL}"
+)
 
 
-# =========================================================
+# ============================================================
 # LOAD RERANKER
-# =========================================================
+# ============================================================
 
 print("\nLoading reranker...")
 
 reranker = CrossEncoder(
     RERANKER_MODEL,
-    max_length=512
+    max_length=384
 )
 
-print("Reranker loaded.")
+print(
+    f"Reranker loaded: "
+    f"{RERANKER_MODEL}"
+)
 
 
-# =========================================================
+# ============================================================
 # DENSE SEARCH
-# =========================================================
+# ============================================================
 
-def dense_search(query, top_k=CANDIDATE_K):
+def dense_search(
+    query,
+    top_k=CANDIDATE_K
+):
 
-    # Never ask FAISS for more vectors than it contains.
     top_k = min(
         top_k,
         faiss_index.ntotal
     )
 
+
+    # --------------------------------------------------------
+    # Query embedding
+    # --------------------------------------------------------
+
     query_embedding = embedding_model.encode(
         [query],
-        normalize_embeddings=True
+        normalize_embeddings=True,
+        convert_to_numpy=True
     )
+
 
     query_embedding = np.asarray(
         query_embedding,
         dtype="float32"
     )
 
+
+    # --------------------------------------------------------
+    # FAISS search
+    # --------------------------------------------------------
+
     scores, indices = faiss_index.search(
         query_embedding,
         top_k
     )
 
+
     results = []
 
-    for rank, idx in enumerate(indices[0]):
+
+    for rank, idx in enumerate(
+        indices[0]
+    ):
 
         if idx < 0:
+
             continue
+
+
+        idx = int(idx)
+
 
         if idx >= len(chunks):
+
             continue
 
-        results.append({
-            "index": int(idx),
-            "rank": rank + 1,
-            "score": float(scores[0][rank])
-        })
+
+        results.append(
+            {
+                "index": idx,
+
+                "rank": rank + 1,
+
+                "dense_score": float(
+                    scores[0][rank]
+                )
+            }
+        )
+
 
     return results
 
 
-# =========================================================
+# ============================================================
 # BM25 SEARCH
-# =========================================================
+# ============================================================
 
-def bm25_search(query, top_k=CANDIDATE_K):
+def bm25_search(
+    query,
+    top_k=CANDIDATE_K
+):
 
     top_k = min(
         top_k,
         len(chunks)
     )
 
-    query_tokens = query.lower().split()
+
+    # --------------------------------------------------------
+    # Tokenize
+    # --------------------------------------------------------
+
+    query_tokens = (
+        query.lower()
+        .split()
+    )
+
+
+    if not query_tokens:
+
+        return []
+
+
+    # --------------------------------------------------------
+    # BM25
+    # --------------------------------------------------------
 
     scores = bm25.get_scores(
         query_tokens
     )
 
+
     top_indices = np.argsort(
         scores
     )[::-1][:top_k]
 
+
     results = []
 
-    for rank, idx in enumerate(top_indices):
+
+    for rank, idx in enumerate(
+        top_indices
+    ):
 
         idx = int(idx)
 
+
         if idx < 0 or idx >= len(chunks):
+
             continue
 
-        results.append({
-            "index": idx,
-            "rank": rank + 1,
-            "score": float(scores[idx])
-        })
+
+        results.append(
+            {
+                "index": idx,
+
+                "rank": rank + 1,
+
+                "bm25_score": float(
+                    scores[idx]
+                )
+            }
+        )
+
 
     return results
 
 
-# =========================================================
-# RECIPROCAL RANK FUSION
-# =========================================================
+# ============================================================
+# RRF FUSION
+# ============================================================
 
 def rrf_fusion(
     dense_results,
     bm25_results,
-    k=60
+    k=RRF_K
 ):
+    """
+    Reciprocal Rank Fusion.
 
-    fused = {}
+    Documents appearing in both semantic and keyword
+    retrieval receive stronger fused rankings.
+    """
 
-    # Dense retrieval contribution
+    fused_scores = {}
+
+
+    # ========================================================
+    # DENSE
+    # ========================================================
+
     for result in dense_results:
 
         idx = result["index"]
 
-        fused[idx] = (
-            fused.get(idx, 0.0)
-            + 1.0 / (k + result["rank"])
+        fused_scores[idx] = (
+            fused_scores.get(
+                idx,
+                0.0
+            )
+            +
+            1.0 / (
+                k + result["rank"]
+            )
         )
 
-    # BM25 contribution
+
+    # ========================================================
+    # BM25
+    # ========================================================
+
     for result in bm25_results:
 
         idx = result["index"]
 
-        fused[idx] = (
-            fused.get(idx, 0.0)
-            + 1.0 / (k + result["rank"])
+        fused_scores[idx] = (
+            fused_scores.get(
+                idx,
+                0.0
+            )
+            +
+            1.0 / (
+                k + result["rank"]
+            )
         )
 
-    return sorted(
-        fused.items(),
+
+    # ========================================================
+    # SORT
+    # ========================================================
+
+    ranked = sorted(
+        fused_scores.items(),
         key=lambda x: x[1],
         reverse=True
     )
 
 
-# =========================================================
+    return ranked
+
+
+# ============================================================
+# GET CHUNK
+# ============================================================
+
+def get_chunk_result(
+    idx
+):
+
+    chunk = chunks[idx]
+
+
+    return {
+        "index": int(idx),
+
+        "chunk_id": chunk.get(
+            "chunk_id",
+            idx
+        ),
+
+        "document": chunk.get(
+            "document",
+            "Unknown document"
+        ),
+
+        "page": chunk.get(
+            "page",
+            "Unknown"
+        ),
+
+        "section": chunk.get(
+            "section"
+        ),
+
+        "subsection": chunk.get(
+            "subsection"
+        ),
+
+        "text": chunk.get(
+            "text",
+            ""
+        )
+    }
+
+
+# ============================================================
+# CROSS-ENCODER RERANK
+# ============================================================
+
+def rerank_candidates(
+    query,
+    candidates
+):
+
+    if not candidates:
+
+        return []
+
+
+    pairs = []
+
+
+    for candidate in candidates:
+
+        idx = candidate["index"]
+
+        pairs.append(
+            [
+                query,
+                chunks[idx]["text"]
+            ]
+        )
+
+
+    scores = reranker.predict(
+        pairs
+    )
+
+
+    results = []
+
+
+    for candidate, score in zip(
+        candidates,
+        scores
+    ):
+
+        result = dict(
+            candidate
+        )
+
+
+        result["reranker_score"] = float(
+            score
+        )
+
+
+        result["final_score"] = float(
+            score
+        )
+
+
+        results.append(
+            result
+        )
+
+
+    return results
+
+
+# ============================================================
 # MAIN SEARCH
-# =========================================================
+# ============================================================
 
 def search(
     query,
@@ -251,33 +537,60 @@ def search(
     final_k=FINAL_K
 ):
 
-    print("\n")
-    print("=" * 70)
-    print("QUERY")
-    print("=" * 70)
-    print(query)
+    query = str(
+        query
+    ).strip()
 
 
-    # =====================================================
-    # 1. QUERY ROUTING
-    # =====================================================
+    if not query:
+
+        return []
+
+
+    print(
+        "\n" + "=" * 70
+    )
+
+    print(
+        "KRISHIJAL SEARCH"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "\nQuery:"
+    )
+
+    print(
+        query
+    )
+
+
+    # ========================================================
+    # SECTION ROUTING
+    # ========================================================
 
     routed_section, route_score = route_query(
         query
     )
 
+
     print(
-        f"\nRouted section : {routed_section}"
+        f"\nRouted section : "
+        f"{routed_section}"
     )
 
     print(
-        f"Route score    : {route_score}"
+        f"Route score    : "
+        f"{route_score}"
     )
 
 
-    # =====================================================
-    # 2. DENSE SEARCH
-    # =====================================================
+    # ========================================================
+    # SEMANTIC RETRIEVAL
+    # ========================================================
 
     dense_results = dense_search(
         query,
@@ -285,9 +598,9 @@ def search(
     )
 
 
-    # =====================================================
-    # 3. BM25 SEARCH
-    # =====================================================
+    # ========================================================
+    # KEYWORD RETRIEVAL
+    # ========================================================
 
     bm25_results = bm25_search(
         query,
@@ -295,154 +608,146 @@ def search(
     )
 
 
-    # =====================================================
-    # 4. RRF FUSION
-    # =====================================================
+    print(
+        f"\nDense results  : "
+        f"{len(dense_results)}"
+    )
 
-    fused_results = rrf_fusion(
+    print(
+        f"BM25 results   : "
+        f"{len(bm25_results)}"
+    )
+
+
+    # ========================================================
+    # RRF
+    # ========================================================
+
+    fused = rrf_fusion(
         dense_results,
         bm25_results
     )
 
-    candidates = fused_results[:candidate_k]
 
-    print(
-        f"\nHybrid candidates: {len(candidates)}"
-    )
+    fused = fused[
+        :candidate_k
+    ]
 
-    if not candidates:
+
+    if not fused:
+
+        print(
+            "\nNo hybrid candidates."
+        )
+
         return []
 
 
-    # =====================================================
-    # 5. PREPARE RERANKING PAIRS
-    # =====================================================
+    # ========================================================
+    # BUILD CANDIDATE OBJECTS
+    # ========================================================
 
-    pairs = []
+    candidates = []
 
-    for idx, fusion_score in candidates:
 
-        text = chunks[idx]["text"]
+    for idx, fusion_score in fused:
 
-        pairs.append([
-            query,
-            text
-        ])
+        result = get_chunk_result(
+            idx
+        )
 
+
+        result["fusion_score"] = float(
+            fusion_score
+        )
+
+
+        candidates.append(
+            result
+        )
+
+
+    print(
+        f"\nHybrid candidates: "
+        f"{len(candidates)}"
+    )
+
+
+    # ========================================================
+    # CROSS-ENCODER
+    # ========================================================
 
     print(
         "\nReranking candidates..."
     )
 
 
-    # =====================================================
-    # 6. CROSS-ENCODER RERANKING
-    # =====================================================
-
-    rerank_scores = reranker.predict(
-        pairs
+    reranked = rerank_candidates(
+        query,
+        candidates
     )
 
 
-    # =====================================================
-    # 7. BUILD RESULT OBJECTS
-    # =====================================================
+    # ========================================================
+    # SECTION BOOST
+    # ========================================================
 
     ranked = []
 
-    for (
-        (idx, fusion_score),
-        rerank_score
-    ) in zip(
-        candidates,
-        rerank_scores
-    ):
 
-        chunk = chunks[idx]
+    for result in reranked:
 
-        section = chunk.get(
-            "section",
-            None
+        section = result.get(
+            "section"
         )
 
-        subsection = chunk.get(
-            "subsection",
-            None
-        )
-
-
-        # =================================================
-        # SECTION BOOST
-        # =================================================
 
         section_boost = 0.0
 
+
         if (
-            routed_section is not None
-            and section is not None
-            and section == routed_section
+            routed_section
+            and section
         ):
 
-            section_boost = SECTION_BOOST
+            # Exact match
+            if section == routed_section:
+
+                section_boost = SECTION_BOOST
 
 
-        original_score = float(
-            rerank_score
+            # Case-insensitive match
+            elif (
+                str(section).lower()
+                ==
+                str(
+                    routed_section
+                ).lower()
+            ):
+
+                section_boost = SECTION_BOOST
+
+
+        result["section_boost"] = (
+            section_boost
         )
 
-        final_score = (
-            original_score
-            + section_boost
+
+        result["final_score"] = (
+            result["reranker_score"]
+            +
+            section_boost
         )
 
 
-        ranked.append({
-
-            "index": int(idx),
-
-            "chunk_id": chunk.get(
-                "chunk_id",
-                idx
-            ),
-
-            "document": chunk.get(
-                "document",
-                "Unknown document"
-            ),
-
-            "page": chunk.get(
-                "page",
-                0
-            ),
-
-            "section": section,
-
-            "subsection": subsection,
-
-            "text": chunk.get(
-                "text",
-                ""
-            ),
-
-            "fusion_score": float(
-                fusion_score
-            ),
-
-            "reranker_score": original_score,
-
-            "section_boost": float(
-                section_boost
-            ),
-
-            "final_score": float(
-                final_score
-            )
-        })
+        ranked.append(
+            result
+        )
 
 
-    # =====================================================
-    # 8. SORT BY FINAL SCORE
-    # =====================================================
+    # ========================================================
+    # SORT FINAL RESULTS
+    # ========================================================
 
     ranked.sort(
         key=lambda x: x["final_score"],
@@ -450,53 +755,9 @@ def search(
     )
 
 
-    # =====================================================
-    # 9. SECTION-AWARE PRIORITY
-    # =====================================================
-
-    if routed_section is not None:
-
-        section_results = []
-
-        other_results = []
-
-        for result in ranked:
-
-            if result["section"] == routed_section:
-
-                section_results.append(
-                    result
-                )
-
-            else:
-
-                other_results.append(
-                    result
-                )
-
-
-        # Keep score ordering inside each group.
-        section_results.sort(
-            key=lambda x: x["final_score"],
-            reverse=True
-        )
-
-        other_results.sort(
-            key=lambda x: x["final_score"],
-            reverse=True
-        )
-
-
-        # Only prioritize the routed section.
-        ranked = (
-            section_results
-            + other_results
-        )
-
-
-    # =====================================================
-    # 10. REMOVE WEAK RESULTS
-    # =====================================================
+    # ========================================================
+    # FILTER ONLY EXTREMELY BAD RESULTS
+    # ========================================================
 
     filtered = [
 
@@ -510,54 +771,34 @@ def search(
     ]
 
 
-    # =====================================================
-    # 11. FALLBACK
-    # =====================================================
+    # ========================================================
+    # FINAL TOP K
+    # ========================================================
 
-    if not filtered and ranked:
-
-        print(
-            "\nNo result passed the "
-            "relevance threshold."
-        )
-
-        # Keep strongest result so the LLM can still
-        # make the final knowledge-gap decision.
-        filtered = [
-            ranked[0]
-        ]
+    final_results = filtered[
+        :final_k
+    ]
 
 
-    # =====================================================
-    # 12. RETURN FINAL RESULTS
-    # =====================================================
+    # ========================================================
+    # DEBUG OUTPUT
+    # ========================================================
 
-    return filtered[:final_k]
+    print(
+        "\n" + "=" * 70
+    )
 
+    print(
+        "FINAL RERANKED RESULTS"
+    )
 
-# =========================================================
-# DISPLAY RESULTS
-# =========================================================
-
-def display_results(results):
-
-    print("\n")
-    print("=" * 70)
-    print("FINAL RERANKED RESULTS")
-    print("=" * 70)
-
-
-    if not results:
-
-        print(
-            "\nNo relevant evidence found."
-        )
-
-        return
+    print(
+        "=" * 70
+    )
 
 
     for i, result in enumerate(
-        results,
+        final_results,
         start=1
     ):
 
@@ -569,54 +810,40 @@ def display_results(results):
             "-" * 70
         )
 
-
-        print(
-            f"Chunk ID       : "
-            f"{result['chunk_id']}"
-        )
-
-
         print(
             f"Document       : "
             f"{result['document']}"
         )
-
 
         print(
             f"Page           : "
             f"{result['page']}"
         )
 
-
         print(
             f"Section        : "
-            f"{result['section']}"
+            f"{result.get('section') or 'General content'}"
         )
-
 
         print(
             f"Subsection     : "
-            f"{result['subsection']}"
+            f"{result.get('subsection') or 'None'}"
         )
-
 
         print(
             f"Fusion score   : "
             f"{result['fusion_score']:.5f}"
         )
 
-
         print(
             f"Reranker score : "
             f"{result['reranker_score']:.5f}"
         )
 
-
         print(
             f"Section boost  : "
             f"{result['section_boost']:.5f}"
         )
-
 
         print(
             f"Final score    : "
@@ -624,26 +851,27 @@ def display_results(results):
         )
 
 
-        print(
-            "\nText:"
-        )
+    print(
+        "=" * 70
+    )
 
 
-        print(
-            result["text"][:1200]
-        )
+    return final_results
 
 
-# =========================================================
-# INTERACTIVE MODE
-# =========================================================
+# ============================================================
+# COMMAND-LINE TEST
+# ============================================================
 
 if __name__ == "__main__":
 
-    print("\n")
-    print("=" * 70)
-    print("RERANKED HYBRID RAG SEARCH")
-    print("=" * 70)
+    print(
+        "\nKrishiJal Hybrid + Reranker Test"
+    )
+
+    print(
+        "Type 'exit' to stop."
+    )
 
 
     while True:
@@ -654,7 +882,6 @@ if __name__ == "__main__":
                 "\nEnter your question: "
             ).strip()
 
-
         except KeyboardInterrupt:
 
             print(
@@ -663,10 +890,6 @@ if __name__ == "__main__":
 
             break
 
-
-        # -------------------------------------------------
-        # Exit
-        # -------------------------------------------------
 
         if query.lower() in [
             "exit",
@@ -680,10 +903,6 @@ if __name__ == "__main__":
             break
 
 
-        # -------------------------------------------------
-        # Empty question
-        # -------------------------------------------------
-
         if not query:
 
             print(
@@ -693,10 +912,6 @@ if __name__ == "__main__":
             continue
 
 
-        # -------------------------------------------------
-        # SEARCH
-        # -------------------------------------------------
-
         try:
 
             results = search(
@@ -705,22 +920,42 @@ if __name__ == "__main__":
                 final_k=FINAL_K
             )
 
-            display_results(
-                results
-            )
+
+            if not results:
+
+                print(
+                    "\nNo relevant evidence found."
+                )
+
+            else:
+
+                print(
+                    "\nFinal evidence:"
+                )
 
 
-        except Exception as e:
+                for i, result in enumerate(
+                    results,
+                    start=1
+                ):
+
+                    print(
+                        f"\n{i}. "
+                        f"{result['document']} "
+                        f"• Page {result['page']}"
+                    )
+
+                    print(
+                        result["text"][:800]
+                    )
+
+
+        except Exception as exc:
 
             print(
-                "\nERROR during search:"
+                "\nERROR:"
             )
 
-            print(e)
-
             print(
-                "\nCheck that these files exist:\n"
-                "data/processed/chunks.pkl\n"
-                "data/processed/faiss.index\n"
-                "data/processed/bm25.pkl"
+                repr(exc)
             )

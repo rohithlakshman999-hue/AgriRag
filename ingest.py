@@ -1,198 +1,823 @@
+# ============================================================
+# KrishiJal AI - PDF Ingestion Pipeline
+# ============================================================
+#
+# Extracts:
+#   - document
+#   - page
+#   - section
+#   - subsection
+#   - clean text
+#
+# Then creates overlapping chunks for RAG retrieval.
+# ============================================================
+
 import os
-import re
 import pickle
+import re
+
 import pymupdf
 
+
+# ============================================================
+# PATHS
+# ============================================================
+
 RAW_DIR = "data/raw"
+
 OUTPUT_FILE = "data/processed/chunks.pkl"
 
+
+# ============================================================
+# CHUNK SETTINGS
+# ============================================================
+
 CHUNK_SIZE = 350
+
 CHUNK_OVERLAP = 70
 
 
-# Known main section headings in this PDF
-MAIN_SECTIONS = {
-    "1": "1. Introduction",
-    "2": "2. Objectives",
-    "3": "3. Coverage of Farmers",
-    "4": "4. Coverage of Crops",
-    "5": "5. Coverage of Risks and Exclusions",
-}
-
+# ============================================================
+# TEXT CLEANING
+# ============================================================
 
 def normalize_text(text):
-    text = re.sub(r"\s+", " ", text)
+    """
+    Clean extracted PDF text while preserving readable content.
+    """
+
+    if not text:
+        return ""
+
+    # Normalize line endings
+    text = text.replace("\r\n", "\n")
+    text = text.replace("\r", "\n")
+
+    # Remove excessive spaces around lines
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
+    )
+
+    # Remove excessive blank lines
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text
+    )
+
     return text.strip()
 
 
-def detect_sections(text):
+def clean_chunk_text(text):
     """
-    Find real main-section markers such as:
-    3. Coverage of Farmers
-    4. Coverage of Crops
-    5. Coverage of Risks and Exclusions
+    Final cleanup for chunk text.
     """
 
-    positions = []
+    if not text:
+        return ""
 
-    patterns = [
-        (r"\b3\s+3\.\s+Coverage of Farmers\b", "3. Coverage of Farmers"),
-        (r"\b4\.\s+Coverage of Crops\b", "4. Coverage of Crops"),
-        (r"\b5\.\s+Coverage of Risks and Exclusions\b",
-         "5. Coverage of Risks and Exclusions"),
-    ]
-
-    for pattern, section_name in patterns:
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            positions.append({
-                "start": match.start(),
-                "name": section_name
-            })
-
-    positions.sort(key=lambda x: x["start"])
-
-    return positions
-
-
-def detect_subsections(text):
-    """
-    Detect subsection numbers such as:
-    3.1
-    3.1.1
-    3.1.1.1
-    5.1
-    5.1.1
-    """
-
-    pattern = r"\b(\d+\.\d+(?:\.\d+){0,2})\b"
-
-    return list(re.finditer(pattern, text))
-
-
-def split_page(text, page_number, document):
     text = normalize_text(text)
 
-    section_positions = detect_sections(text)
+    # Convert repeated whitespace/newlines into spaces
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
 
-    results = []
+    return text.strip()
 
-    if not section_positions:
-        return [{
-            "document": document,
-            "page": page_number,
-            "section": None,
-            "subsection": None,
-            "text": text
-        }]
 
-    for i, section in enumerate(section_positions):
+# ============================================================
+# SECTION DETECTION
+# ============================================================
 
-        start = section["start"]
+# Common patterns found in government/agriculture PDFs.
+#
+# Examples:
+#   1. Introduction
+#   2. Objectives
+#   3. Implementation
+#   10.0 State Level Committee
+#   1.1 Background
+#   2.3 Micro Irrigation
+#
+# We deliberately don't hard-code PMFBY sections.
+# ============================================================
 
-        if i + 1 < len(section_positions):
-            end = section_positions[i + 1]["start"]
-        else:
-            end = len(text)
+MAIN_SECTION_PATTERNS = [
 
-        section_text = text[start:end].strip()
+    re.compile(
+        r"^\s*(\d+)\.\s+([A-Z][^\n]{2,150})$"
+    ),
 
-        results.append({
-            "document": document,
-            "page": page_number,
-            "section": section["name"],
-            "subsection": None,
-            "text": section_text
-        })
+    re.compile(
+        r"^\s*(\d+)\.0\s+([A-Z][^\n]{2,150})$"
+    ),
 
-    return results
+]
 
-def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+
+SUBSECTION_PATTERNS = [
+
+    re.compile(
+        r"^\s*(\d+\.\d+)\s+(.+)$"
+    ),
+
+    re.compile(
+        r"^\s*(\d+\.\d+\.\d+)\s+(.+)$"
+    ),
+
+    re.compile(
+        r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.+)$"
+    ),
+
+]
+
+
+def looks_like_heading(text):
+    """
+    Determine whether a line is likely to be a heading.
+
+    This avoids treating normal numbered sentences,
+    tables, years, percentages, etc. as headings.
+    """
+
+    text = text.strip()
+
+    if not text:
+        return False
+
+    # Very long lines are unlikely to be headings
+    if len(text) > 180:
+        return False
 
     words = text.split()
 
+    if len(words) > 25:
+        return False
+
+    # Ignore obvious table-like lines
+    if text.count("|") >= 2:
+        return False
+
+    # Ignore lines ending with punctuation
+    if text.endswith(
+        (".", ",", ";", ":", "?", "!")
+    ):
+        return False
+
+    return True
+
+
+def detect_heading(line):
+    """
+    Detect main section or subsection heading.
+
+    Returns:
+        {
+            "type": "section" / "subsection",
+            "number": ...,
+            "name": ...
+        }
+
+    or None.
+    """
+
+    line = line.strip()
+
+    if not line:
+        return None
+
+    if not looks_like_heading(line):
+        return None
+
+
+    # ========================================================
+    # Main section
+    # ========================================================
+
+    for pattern in MAIN_SECTION_PATTERNS:
+
+        match = pattern.match(line)
+
+        if match:
+
+            number = match.group(1)
+
+            title = match.group(2).strip()
+
+            return {
+                "type": "section",
+                "number": number,
+                "name": f"{number}. {title}"
+            }
+
+
+    # ========================================================
+    # Subsection
+    # ========================================================
+
+    for pattern in SUBSECTION_PATTERNS:
+
+        match = pattern.match(line)
+
+        if match:
+
+            number = match.group(1)
+
+            title = match.group(2).strip()
+
+            return {
+                "type": "subsection",
+                "number": number,
+                "name": f"{number} {title}"
+            }
+
+
+    return None
+
+
+# ============================================================
+# PAGE SEGMENTATION
+# ============================================================
+
+def split_page_into_segments(
+    text,
+    page_number,
+    document,
+    current_section=None,
+    current_subsection=None
+):
+    """
+    Split one PDF page into semantic sections/subsections.
+
+    Context is carried forward from previous pages.
+    """
+
+    text = normalize_text(text)
+
+    if not text:
+        return [], current_section, current_subsection
+
+
+    lines = text.split("\n")
+
+
+    segments = []
+
+    current_lines = []
+
+    active_section = current_section
+
+    active_subsection = current_subsection
+
+
+    def flush_segment():
+
+        nonlocal current_lines
+
+        if not current_lines:
+            return
+
+        segment_text = clean_chunk_text(
+            " ".join(current_lines)
+        )
+
+        if segment_text:
+
+            segments.append(
+                {
+                    "document": document,
+
+                    "page": page_number,
+
+                    "section": active_section,
+
+                    "subsection": active_subsection,
+
+                    "text": segment_text
+                }
+            )
+
+        current_lines = []
+
+
+    for line in lines:
+
+        line = line.strip()
+
+        if not line:
+            continue
+
+
+        heading = detect_heading(
+            line
+        )
+
+
+        if heading:
+
+            # ----------------------------------------------
+            # New main section
+            # ----------------------------------------------
+
+            if heading["type"] == "section":
+
+                flush_segment()
+
+                active_section = (
+                    heading["name"]
+                )
+
+                active_subsection = None
+
+                continue
+
+
+            # ----------------------------------------------
+            # New subsection
+            # ----------------------------------------------
+
+            if heading["type"] == "subsection":
+
+                # Only treat subsection as a real
+                # subsection when it belongs to the
+                # currently active section.
+
+                flush_segment()
+
+                active_subsection = (
+                    heading["name"]
+                )
+
+                continue
+
+
+        current_lines.append(
+            line
+        )
+
+
+    flush_segment()
+
+
+    # --------------------------------------------------------
+    # If the page produced no segments, keep whole page
+    # --------------------------------------------------------
+
+    if not segments:
+
+        cleaned = clean_chunk_text(
+            text
+        )
+
+        if cleaned:
+
+            segments.append(
+                {
+                    "document": document,
+
+                    "page": page_number,
+
+                    "section": active_section,
+
+                    "subsection": active_subsection,
+
+                    "text": cleaned
+                }
+            )
+
+
+    return (
+        segments,
+        active_section,
+        active_subsection
+    )
+
+
+# ============================================================
+# CHUNK TEXT
+# ============================================================
+
+def chunk_text(
+    text,
+    chunk_size=CHUNK_SIZE,
+    overlap=CHUNK_OVERLAP
+):
+    """
+    Split text into overlapping word chunks.
+    """
+
+    text = clean_chunk_text(
+        text
+    )
+
+    if not text:
+        return []
+
+    words = text.split()
+
+
     if len(words) <= chunk_size:
+
         return [text]
+
 
     chunks = []
 
     start = 0
 
+
     while start < len(words):
 
-        end = min(start + chunk_size, len(words))
+        end = min(
+            start + chunk_size,
+            len(words)
+        )
 
-        chunks.append(" ".join(words[start:end]))
 
-        if end == len(words):
+        chunk = " ".join(
+            words[start:end]
+        )
+
+
+        if chunk.strip():
+
+            chunks.append(
+                chunk.strip()
+            )
+
+
+        if end >= len(words):
+
             break
 
+
         start = end - overlap
+
 
     return chunks
 
 
+# ============================================================
+# PROCESS PDF
+# ============================================================
+
+def process_pdf(
+    pdf_path,
+    document
+):
+    """
+    Extract and chunk a single PDF.
+    """
+
+    print(
+        f"\nProcessing: {document}"
+    )
+
+
+    doc = pymupdf.open(
+        pdf_path
+    )
+
+
+    document_chunks = []
+
+
+    current_section = None
+
+    current_subsection = None
+
+
+    for page_index, page in enumerate(
+        doc
+    ):
+
+        page_number = page_index + 1
+
+
+        try:
+
+            raw_text = page.get_text(
+                "text"
+            )
+
+        except Exception as exc:
+
+            print(
+                f"Warning: Could not extract "
+                f"page {page_number}: {exc}"
+            )
+
+            continue
+
+
+        if not raw_text.strip():
+
+            continue
+
+
+        segments, current_section, current_subsection = (
+            split_page_into_segments(
+                raw_text,
+                page_number,
+                document,
+                current_section,
+                current_subsection
+            )
+        )
+
+
+        for segment in segments:
+
+            pieces = chunk_text(
+                segment["text"]
+            )
+
+
+            for piece in pieces:
+
+                document_chunks.append(
+                    {
+                        "document": document,
+
+                        "page": segment["page"],
+
+                        "section": segment[
+                            "section"
+                        ],
+
+                        "subsection": segment[
+                            "subsection"
+                        ],
+
+                        "text": piece
+                    }
+                )
+
+
+    doc.close()
+
+
+    return document_chunks
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
 
-    os.makedirs("data/processed", exist_ok=True)
+    os.makedirs(
+        "data/processed",
+        exist_ok=True
+    )
+
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "KRISHIJAL AI - PDF INGESTION"
+    )
+
+    print(
+        "=" * 70
+    )
+
+
+    # ========================================================
+    # FIND PDF FILES
+    # ========================================================
+
+    if not os.path.exists(
+        RAW_DIR
+    ):
+
+        raise FileNotFoundError(
+            f"Raw directory not found: {RAW_DIR}"
+        )
+
+
+    pdf_files = sorted(
+        [
+            file
+            for file in os.listdir(RAW_DIR)
+            if file.lower().endswith(".pdf")
+        ]
+    )
+
+
+    print(
+        f"\nFound PDFs: {len(pdf_files)}"
+    )
+
+
+    if not pdf_files:
+
+        raise RuntimeError(
+            "No PDF files found in data/raw."
+        )
+
+
+    # ========================================================
+    # PROCESS ALL PDFs
+    # ========================================================
 
     all_chunks = []
-    chunk_id = 0
 
-    pdf_files = [
-        f for f in os.listdir(RAW_DIR)
-        if f.lower().endswith(".pdf")
-    ]
-
-    print(f"Found PDFs: {len(pdf_files)}")
 
     for pdf_file in pdf_files:
 
-        pdf_path = os.path.join(RAW_DIR, pdf_file)
+        pdf_path = os.path.join(
+            RAW_DIR,
+            pdf_file
+        )
 
-        print(f"\nProcessing: {pdf_file}")
 
-        doc = pymupdf.open(pdf_path)
+        try:
 
-        for page_index, page in enumerate(doc):
-
-            page_number = page_index + 1
-
-            text = page.get_text("text")
-
-            sections = split_page(
-                text,
-                page_number,
+            chunks = process_pdf(
+                pdf_path,
                 pdf_file
             )
 
-            for section in sections:
 
-                pieces = chunk_text(section["text"])
+            print(
+                f"  Chunks created: "
+                f"{len(chunks)}"
+            )
 
-                for piece in pieces:
 
-                    all_chunks.append({
-                        "chunk_id": chunk_id,
-                        "document": section["document"],
-                        "page": section["page"],
-                        "section": section["section"],
-                        "subsection": section["subsection"],
-                        "text": piece
-                    })
+            all_chunks.extend(
+                chunks
+            )
 
-                    chunk_id += 1
 
-        doc.close()
+        except Exception as exc:
 
-    with open(OUTPUT_FILE, "wb") as f:
-        pickle.dump(all_chunks, f)
+            print(
+                f"\nERROR processing "
+                f"{pdf_file}:"
+            )
 
-    print("\n" + "=" * 60)
-    print(f"Total PDFs   : {len(pdf_files)}")
-    print(f"Total chunks : {len(all_chunks)}")
-    print(f"Saved to     : {OUTPUT_FILE}")
-    print("=" * 60)
+            print(
+                exc
+            )
 
+
+    # ========================================================
+    # ASSIGN CHUNK IDS
+    # ========================================================
+
+    final_chunks = []
+
+
+    for chunk_id, chunk in enumerate(
+        all_chunks
+    ):
+
+        chunk["chunk_id"] = chunk_id
+
+        final_chunks.append(
+            chunk
+        )
+
+
+    # ========================================================
+    # SAVE
+    # ========================================================
+
+    with open(
+        OUTPUT_FILE,
+        "wb"
+    ) as f:
+
+        pickle.dump(
+            final_chunks,
+            f
+        )
+
+
+    # ========================================================
+    # STATISTICS
+    # ========================================================
+
+    documents = sorted(
+        set(
+            chunk["document"]
+            for chunk in final_chunks
+        )
+    )
+
+
+    sections = sorted(
+        set(
+            chunk["section"]
+            for chunk in final_chunks
+            if chunk.get("section")
+        )
+    )
+
+
+    chunks_with_sections = sum(
+        1
+        for chunk in final_chunks
+        if chunk.get("section")
+    )
+
+
+    chunks_with_subsections = sum(
+        1
+        for chunk in final_chunks
+        if chunk.get("subsection")
+    )
+
+
+    # ========================================================
+    # FINAL OUTPUT
+    # ========================================================
+
+    print(
+        "\n" + "=" * 70
+    )
+
+    print(
+        "INGESTION COMPLETE"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        f"Total PDFs             : "
+        f"{len(pdf_files)}"
+    )
+
+    print(
+        f"Total chunks           : "
+        f"{len(final_chunks)}"
+    )
+
+    print(
+        f"Chunks with sections   : "
+        f"{chunks_with_sections}"
+    )
+
+    print(
+        f"Chunks with subsections: "
+        f"{chunks_with_subsections}"
+    )
+
+    print(
+        f"Saved to               : "
+        f"{OUTPUT_FILE}"
+    )
+
+
+    print(
+        "\nDocuments:"
+    )
+
+    for document in documents:
+
+        count = sum(
+            1
+            for chunk in final_chunks
+            if chunk["document"] == document
+        )
+
+        print(
+            f"  - {document}: "
+            f"{count} chunks"
+        )
+
+
+    print(
+        "\nDetected sections:"
+    )
+
+    for section in sections:
+
+        print(
+            f"  - {section}"
+        )
+
+
+    print(
+        "=" * 70
+    )
+
+
+# ============================================================
+# RUN
+# ============================================================
 
 if __name__ == "__main__":
+
     main()
