@@ -1,26 +1,62 @@
 # ============================================================
-# KrishiJal AI - Evidence Grounded Answer Generation
+# KrishiJal AI / AgriRAG
+# Evidence-Grounded Agricultural Answer Generation
 # ============================================================
 
 import os
 
+import streamlit as st
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
 
 
 # ============================================================
-# ENVIRONMENT
+# 1. ENVIRONMENT
 # ============================================================
 
 load_dotenv()
 
-HF_TOKEN = os.getenv("HF_TOKEN")
 
-MODEL = "openai/gpt-oss-120b"
+# ------------------------------------------------------------
+# Helper: safely read Streamlit Cloud secrets
+# ------------------------------------------------------------
+
+def get_secret(name, default=None):
+    """
+    Read a value from Streamlit Cloud Secrets.
+
+    Falls back to environment variables for local execution.
+    """
+
+    try:
+        value = st.secrets.get(name)
+
+        if value is not None and str(value).strip():
+            return str(value).strip()
+
+    except Exception:
+        pass
+
+    value = os.getenv(name)
+
+    if value is not None and str(value).strip():
+        return str(value).strip()
+
+    return default
+
+
+HF_TOKEN = get_secret(
+    "HF_TOKEN"
+)
+
+MODEL = get_secret(
+    "HF_MODEL",
+    "openai/gpt-oss-120b"
+)
 
 
 # ============================================================
-# KNOWLEDGE GAP MESSAGE
+# 2. KNOWLEDGE GAP MESSAGE
 # ============================================================
 
 KNOWLEDGE_GAP_MESSAGE = (
@@ -30,67 +66,94 @@ KNOWLEDGE_GAP_MESSAGE = (
 
 
 # ============================================================
-# HUGGING FACE CLIENT
+# 3. HUGGING FACE CLIENT
 # ============================================================
+
+client = None
 
 if HF_TOKEN:
 
-    client = InferenceClient(
-        api_key=HF_TOKEN
-    )
+    try:
 
-else:
+        client = InferenceClient(
+            api_key=HF_TOKEN
+        )
 
-    client = None
+    except Exception as exc:
+
+        print(
+            "Failed to initialize Hugging Face client:",
+            repr(exc)
+        )
+
+        client = None
 
 
 # ============================================================
-# KNOWLEDGE GAP DETECTION
+# 4. KNOWLEDGE-GAP DETECTION
 # ============================================================
 
 def is_knowledge_gap(answer):
     """
-    Detect a complete knowledge gap.
+    Detect whether the generated response is a complete
+    knowledge-gap response.
 
-    A partial answer such as:
-    "The exact interval is not documented, but the
-    documents recommend drip irrigation..."
+    A partial answer is NOT considered a complete gap.
 
-    is NOT treated as a complete knowledge gap.
+    Example:
+
+    "The exact interval is not documented, but the documents
+    recommend drip irrigation..."
+
+    This should return False.
     """
 
     if not answer:
-
         return True
 
-    text = answer.lower().strip()
-
+    text = str(answer).lower().strip()
 
     complete_gap_phrases = [
 
-        "i don't have enough relevant information in the "
-        "provided documents to answer this.",
+        (
+            "i don't have enough relevant information in the "
+            "provided documents to answer this."
+        ),
 
         "i don't have enough relevant information",
 
-        "i don't have enough information in the provided "
-        "documents to answer this.",
+        (
+            "i don't have enough information in the provided "
+            "documents to answer this."
+        ),
 
-        "i don't have enough information in the provided "
-        "documents",
+        (
+            "i don't have enough information in the provided "
+            "documents"
+        ),
 
-        "the provided documents do not contain enough "
-        "information",
+        (
+            "the provided documents do not contain enough "
+            "information"
+        ),
 
-        "the provided documents do not contain relevant "
-        "information",
+        (
+            "the provided documents do not contain relevant "
+            "information"
+        ),
 
         "no relevant information is provided",
 
-        "there is no relevant information in the provided "
-        "documents"
-    ]
+        (
+            "there is no relevant information in the provided "
+            "documents"
+        ),
 
+        "insufficient evidence in the available documents",
+
+        "insufficient evidence",
+
+    ]
 
     for phrase in complete_gap_phrases:
 
@@ -98,31 +161,31 @@ def is_knowledge_gap(answer):
 
             return True
 
-
     return False
 
 
 # ============================================================
-# EVIDENCE PREPARATION
+# 5. EVIDENCE PREPARATION
 # ============================================================
 
 def prepare_evidence(results):
     """
-    Convert retrieved chunks into clean evidence for the LLM.
+    Convert retrieved results into a clean evidence block
+    for the language model.
     """
 
     if not results:
-
         return ""
 
-
     evidence_blocks = []
-
 
     for i, result in enumerate(
         results,
         start=1
     ):
+
+        if not isinstance(result, dict):
+            continue
 
         document = result.get(
             "document",
@@ -145,8 +208,15 @@ def prepare_evidence(results):
         text = result.get(
             "text",
             ""
-        ).strip()
+        )
 
+        if text is None:
+            text = ""
+
+        text = str(text).strip()
+
+        if not text:
+            continue
 
         location = (
             f"Document: {document}\n"
@@ -154,13 +224,10 @@ def prepare_evidence(results):
             f"Section: {section}"
         )
 
-
         if subsection:
-
             location += (
                 f"\nSubsection: {subsection}"
             )
-
 
         evidence_blocks.append(
             f"""
@@ -173,17 +240,19 @@ CONTENT:
 """
         )
 
-
     return "\n".join(
         evidence_blocks
     )
 
 
 # ============================================================
-# LANGUAGE INSTRUCTION
+# 6. LANGUAGE INSTRUCTIONS
 # ============================================================
 
 def get_language_instruction(language):
+    """
+    Return the response-language instruction.
+    """
 
     if language == "Tamil":
 
@@ -191,48 +260,67 @@ def get_language_instruction(language):
 Respond in simple, natural Tamil that farmers can
 understand easily.
 
-Use important English agricultural terms in parentheses
+Use important agricultural English terms in parentheses
 where useful.
 
-For example:
+Examples:
+
 துளி பாசனம் (Drip irrigation)
+
 மண் ஈரப்பதம் (Soil moisture)
+
+நீர்ப்பாசன அட்டவணை (Irrigation scheduling)
+
+நீர் பயன்பாட்டு திறன் (Water-use efficiency)
 """
 
     return """
 Respond in simple, clear English suitable for farmers.
+
 Avoid unnecessary technical terminology.
+
+Prefer short paragraphs and clear practical wording.
 """
 
 
 # ============================================================
-# SYSTEM PROMPT
+# 7. SYSTEM PROMPT
 # ============================================================
 
 def build_system_prompt(language):
 
-    language_instruction = get_language_instruction(
-        language
+    language_instruction = (
+        get_language_instruction(
+            language
+        )
     )
 
-
     return f"""
-You are KrishiJal AI, an evidence-grounded
-agricultural irrigation and crop water-management
-assistant.
+You are AgriRAG, an evidence-grounded agricultural
+irrigation and crop water-management assistant.
 
 {language_instruction}
 
-You MUST use ONLY the supplied evidence.
-
 ============================================================
-PRIMARY OBJECTIVE
+CORE RULE
 ============================================================
 
-Understand exactly what the farmer is asking and give
-the most useful answer supported by the documents.
+Use ONLY the supplied agricultural evidence.
 
-The answer should be specific to:
+Do NOT use outside agricultural knowledge.
+
+Do NOT invent facts.
+
+============================================================
+WHAT THE ANSWER SHOULD DO
+============================================================
+
+Understand exactly what the farmer is asking.
+
+Provide the most useful answer that is directly supported
+by the supplied evidence.
+
+When available, consider:
 
 - crop
 - growth stage
@@ -240,70 +328,74 @@ The answer should be specific to:
 - water availability
 - farmer intent
 
-when those details are available.
+Prefer evidence that is:
 
-============================================================
-EVIDENCE PRIORITY
-============================================================
+1. Specific to the crop.
+2. Specific to the growth stage.
+3. Relevant to the water condition.
+4. Directly related to the question.
 
-When several documents are supplied:
-
-1. Prefer evidence that is specific to the farmer's crop.
-
-2. Prefer evidence that matches the farmer's growth stage.
-
-3. Prefer evidence that matches the farmer's water condition.
-
-4. Prefer evidence that directly answers the farmer's
-   question.
-
-5. Use generic agricultural guidance only when it directly
-   helps answer the question.
-
-6. Do NOT add unrelated information merely because another
-   document contains the word "irrigation" or "water".
+Ignore unrelated information.
 
 ============================================================
 STRICT FACTUAL RULES
 ============================================================
 
-1. Use ONLY supplied evidence.
+Never invent:
 
-2. Never use outside agricultural knowledge.
+- irrigation intervals
+- number of days
+- water quantities
+- litres
+- doses
+- timings
+- frequencies
+- percentages
+- crop recommendations
 
-3. Never invent facts.
+If the farmer asks for an exact value and the evidence
+does not contain that value, clearly state:
 
-4. Never invent:
-   - irrigation intervals
-   - number of days
-   - water quantities
-   - doses
-   - timings
-   - frequencies
-   - percentages
-   - crop recommendations
+"The documents do not specify the exact value."
 
-5. If a requested exact value is absent, explicitly say
-   that the exact value is not documented.
+Then continue answering other parts that ARE supported.
 
-6. When an exact value is missing, still answer any other
-   parts of the question that ARE supported.
+============================================================
+PARTIAL KNOWLEDGE GAPS
+============================================================
 
-7. Do not turn a partial knowledge gap into a complete
-   knowledge gap.
+There are two different situations.
+
+Situation A:
+The supplied evidence does not meaningfully answer
+the question.
+
+Then say:
+
+"I don't have enough relevant information in the provided
+documents to answer this."
+
+Situation B:
+The evidence answers part of the question but does not
+contain one requested detail.
+
+In this case:
+
+1. Answer the supported part.
+2. Clearly identify the missing detail.
+3. Do NOT reject the entire question.
 
 ============================================================
 MULTI-PART QUESTIONS
 ============================================================
 
-Many farmer questions contain multiple requests.
+If the farmer asks multiple things, answer every supported
+part.
 
 Example:
 
-"What irrigation method should I use, what should I avoid,
-and when should I prioritize watering?"
-
-The response MUST address each supported part separately.
+"What should I use, what should I avoid, and when should
+I prioritize irrigation?"
 
 Use:
 
@@ -316,61 +408,18 @@ Use:
 **When to prioritize**
 - ...
 
-Do not omit a supported part.
-
-============================================================
-EXACT-VALUE QUESTIONS
-============================================================
-
-If the farmer asks:
-
-"What is the exact irrigation interval in days?"
-
-and the evidence does not provide the exact number:
-
-Say:
-
-"The documents do not specify an exact irrigation
-interval in days."
-
-Then provide any related information that IS documented.
-
-Do NOT invent a number.
-
-============================================================
-IMPORTANT DISTINCTION
-============================================================
-
-These two situations are different.
-
-Situation A:
-
-The evidence is unrelated.
-
-Then respond:
-
-"I don't have enough relevant information in the provided
-documents to answer this."
-
-Situation B:
-
-The evidence is related, but one requested detail is missing.
-
-Then answer the supported information and clearly say
-which requested detail is not documented.
-
-NEVER use the complete knowledge-gap response for
-Situation B.
+Do not ignore supported parts.
 
 ============================================================
 ANSWER STYLE
 ============================================================
 
-Your answer must be:
+The answer must be:
 
 - Direct
 - Concise
 - Farmer-friendly
+- Practical
 - Specific
 - Evidence-grounded
 
@@ -385,7 +434,7 @@ Do not mention:
 - BM25
 - embeddings
 - reranking
-- vector databases
+- vector database
 - prompts
 - models
 - retrieval
@@ -397,13 +446,17 @@ Return ONLY the farmer-facing answer.
 
 
 # ============================================================
-# USER PROMPT
+# 8. USER PROMPT
 # ============================================================
 
 def build_user_prompt(
     question,
     evidence
 ):
+    """
+    Build the user message containing the farmer question
+    and retrieved evidence.
+    """
 
     return f"""
 FARMER QUESTION
@@ -424,31 +477,24 @@ TASK
 Answer the farmer's question using ONLY the supplied
 evidence.
 
-Follow these rules:
+Requirements:
 
 1. Understand the exact request.
-
-2. Answer every part that is supported.
-
-3. If an exact requested value is missing, explicitly
-   state that it is not documented.
-
-4. Continue answering the other supported parts.
-
-5. Prefer crop-specific and stage-specific evidence.
-
-6. Ignore unrelated evidence.
-
-7. Never invent information.
-
-8. Keep the response concise and practical.
+2. Answer every supported part.
+3. Prefer crop-specific and stage-specific evidence.
+4. If an exact requested value is missing, say it is
+   not documented.
+5. Continue answering any other supported parts.
+6. Never invent information.
+7. Keep the answer concise and practical.
+8. Do not discuss the internal AI system.
 
 Return only the final farmer-facing answer.
 """
 
 
 # ============================================================
-# GENERATE ANSWER
+# 9. GENERATE ANSWER
 # ============================================================
 
 def generate_answer(
@@ -456,6 +502,9 @@ def generate_answer(
     results,
     language="English"
 ):
+    """
+    Generate an evidence-grounded farmer-facing answer.
+    """
 
     # --------------------------------------------------------
     # No results
@@ -467,14 +516,15 @@ def generate_answer(
 
 
     # --------------------------------------------------------
-    # HF token check
+    # Check Hugging Face configuration
     # --------------------------------------------------------
 
     if client is None:
 
         return (
-            "The language model is not configured. "
-            "Please set HF_TOKEN before starting KrishiJal AI."
+            "The language model is not configured.\n\n"
+            "Please add HF_TOKEN to Streamlit Secrets "
+            "before using AgriRAG."
         )
 
 
@@ -486,20 +536,18 @@ def generate_answer(
         results
     )
 
-
     if not evidence.strip():
 
         return KNOWLEDGE_GAP_MESSAGE
 
 
     # --------------------------------------------------------
-    # Build prompts
+    # Prompts
     # --------------------------------------------------------
 
     system_prompt = build_system_prompt(
         language
     )
-
 
     user_prompt = build_user_prompt(
         question,
@@ -508,7 +556,7 @@ def generate_answer(
 
 
     # --------------------------------------------------------
-    # Generate response
+    # Call Hugging Face
     # --------------------------------------------------------
 
     try:
@@ -520,19 +568,23 @@ def generate_answer(
             messages=[
                 {
                     "role": "system",
-                    "content": system_prompt
+                    "content": system_prompt,
                 },
                 {
                     "role": "user",
-                    "content": user_prompt
-                }
+                    "content": user_prompt,
+                },
             ],
 
             temperature=0.1,
 
-            max_tokens=450
+            max_tokens=500,
         )
 
+
+        # ----------------------------------------------------
+        # Extract response
+        # ----------------------------------------------------
 
         answer = (
             response
@@ -547,7 +599,9 @@ def generate_answer(
             return KNOWLEDGE_GAP_MESSAGE
 
 
-        answer = answer.strip()
+        answer = str(
+            answer
+        ).strip()
 
 
         # ----------------------------------------------------
@@ -575,7 +629,6 @@ def generate_answer(
             repr(exc)
         )
 
-
         return (
             "The answer could not be generated because "
             "the language model is currently unavailable."
@@ -583,25 +636,27 @@ def generate_answer(
 
 
 # ============================================================
-# VERIFIED SOURCES
+# 10. VERIFIED SOURCE EXTRACTION
 # ============================================================
 
 def get_verified_sources(results):
     """
     Return unique document/page/section combinations.
+
+    This information is used by the Streamlit UI.
     """
 
     if not results:
-
         return []
-
 
     sources = []
 
     seen = set()
 
-
     for result in results:
+
+        if not isinstance(result, dict):
+            continue
 
         document = result.get(
             "document",
@@ -621,7 +676,6 @@ def get_verified_sources(results):
             "subsection"
         )
 
-
         key = (
             document,
             page,
@@ -629,25 +683,20 @@ def get_verified_sources(results):
             subsection
         )
 
-
         if key in seen:
-
             continue
-
 
         seen.add(
             key
         )
-
 
         sources.append(
             {
                 "document": document,
                 "page": page,
                 "section": section,
-                "subsection": subsection
+                "subsection": subsection,
             }
         )
-
 
     return sources

@@ -1,8 +1,64 @@
 # ============================================================
 # AgriRAG - Farmer-Friendly Agricultural RAG Assistant
+# Streamlit Application
 # ============================================================
 
+import os
+from pathlib import Path
+
 import streamlit as st
+
+
+# ============================================================
+# 1. PAGE CONFIGURATION
+# ============================================================
+
+st.set_page_config(
+    page_title="AgriRAG",
+    page_icon="🌾",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# ============================================================
+# 2. LOAD STREAMLIT SECRETS BEFORE OTHER PROJECT IMPORTS
+# ============================================================
+#
+# IMPORTANT:
+# answer.py reads HF_TOKEN when it is imported.
+# Therefore, load Streamlit Cloud secrets into environment
+# variables BEFORE importing answer.py.
+#
+# This works for both:
+#   - Local .env
+#   - Streamlit Cloud Secrets
+# ============================================================
+
+try:
+    if "HF_TOKEN" in st.secrets:
+        os.environ["HF_TOKEN"] = str(
+            st.secrets["HF_TOKEN"]
+        )
+
+    if "HF_MODEL" in st.secrets:
+        os.environ["HF_MODEL"] = str(
+            st.secrets["HF_MODEL"]
+        )
+
+    if "EMBEDDING_MODEL" in st.secrets:
+        os.environ["EMBEDDING_MODEL"] = str(
+            st.secrets["EMBEDDING_MODEL"]
+        )
+
+except Exception:
+    # Local execution may not have st.secrets configured.
+    pass
+
+
+# ============================================================
+# 3. IMPORT PROJECT MODULES
+# ============================================================
 
 from query_context import build_context_query
 
@@ -10,26 +66,14 @@ from answer import (
     generate_answer,
     get_verified_sources,
     is_knowledge_gap,
-    KNOWLEDGE_GAP_MESSAGE
+    KNOWLEDGE_GAP_MESSAGE,
 )
 
 from search import search
 
 
 # ============================================================
-# PAGE CONFIGURATION
-# ============================================================
-
-st.set_page_config(
-    page_title="AgriRAG",
-    page_icon="🌾",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-
-# ============================================================
-# SESSION STATE
+# 4. SESSION STATE
 # ============================================================
 
 if "messages" not in st.session_state:
@@ -40,7 +84,7 @@ if "pending_question" not in st.session_state:
 
 
 # ============================================================
-# CUSTOM CSS
+# 5. CUSTOM CSS
 # ============================================================
 
 st.markdown(
@@ -146,24 +190,24 @@ st.markdown(
 
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
 # ============================================================
-# HEADER
+# 6. HEADER
 # ============================================================
 
 st.markdown(
     '<div class="brand-title">🌾 AgriRAG</div>',
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 st.markdown(
     '<div class="brand-subtitle">'
-    'Intelligent agricultural knowledge assistant'
+    'Evidence-Grounded Irrigation Knowledge Assistant'
     '</div>',
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 st.info(
@@ -174,7 +218,7 @@ st.info(
 
 
 # ============================================================
-# SIDEBAR
+# 7. SIDEBAR - FARMER PROFILE
 # ============================================================
 
 with st.sidebar:
@@ -203,8 +247,8 @@ with st.sidebar:
             "Cotton",
             "Groundnut",
             "Vegetables",
-            "Other"
-        ]
+            "Other",
+        ],
     )
 
 
@@ -221,8 +265,8 @@ with st.sidebar:
             "Flowering",
             "Fruit-set",
             "Grain filling",
-            "Maturity"
-        ]
+            "Maturity",
+        ],
     )
 
 
@@ -238,8 +282,8 @@ with st.sidebar:
             "Drip irrigation",
             "Sprinkler irrigation",
             "Furrow irrigation",
-            "Other"
-        ]
+            "Other",
+        ],
     )
 
 
@@ -254,8 +298,8 @@ with st.sidebar:
             "Abundant",
             "Moderate",
             "Low",
-            "Severely limited"
-        ]
+            "Severely limited",
+        ],
     )
 
 
@@ -267,8 +311,8 @@ with st.sidebar:
         "🗣️ Response Language",
         [
             "English",
-            "Tamil"
-        ]
+            "Tamil",
+        ],
     )
 
 
@@ -291,7 +335,6 @@ with st.sidebar:
 
     st.divider()
 
-
     st.caption(
         "AgriRAG does not invent unsupported "
         "agricultural information."
@@ -299,19 +342,19 @@ with st.sidebar:
 
 
 # ============================================================
-# SIDEBAR CONTEXT
+# 8. SIDEBAR CONTEXT
 # ============================================================
 
 sidebar_context = {
     "crop": crop,
     "growth_stage": growth_stage,
     "irrigation_method": irrigation_method,
-    "water_availability": water_availability
+    "water_availability": water_availability,
 }
 
 
 # ============================================================
-# QUICK QUESTIONS
+# 9. QUICK QUESTIONS
 # ============================================================
 
 st.subheader("💡 Quick Questions")
@@ -323,7 +366,7 @@ with q1:
 
     if st.button(
         "💧 Irrigation Scheduling",
-        use_container_width=True
+        use_container_width=True,
     ):
 
         st.session_state.pending_question = (
@@ -335,7 +378,7 @@ with q2:
 
     if st.button(
         "🌱 Crop Water Management",
-        use_container_width=True
+        use_container_width=True,
     ):
 
         if crop == "Not specified":
@@ -357,7 +400,7 @@ with q3:
 
     if st.button(
         "♻️ Save Water",
-        use_container_width=True
+        use_container_width=True,
     ):
 
         st.session_state.pending_question = (
@@ -367,7 +410,7 @@ with q3:
 
 
 # ============================================================
-# CHAT HISTORY
+# 10. CHAT HISTORY
 # ============================================================
 
 for message in st.session_state.messages:
@@ -382,7 +425,7 @@ for message in st.session_state.messages:
 
 
 # ============================================================
-# CHAT INPUT
+# 11. CHAT INPUT
 # ============================================================
 
 typed_question = st.chat_input(
@@ -392,18 +435,22 @@ typed_question = st.chat_input(
 
 if typed_question:
 
-    st.session_state.pending_question = typed_question
+    st.session_state.pending_question = (
+        typed_question
+    )
 
 
 # ============================================================
-# GET QUESTION
+# 12. GET QUESTION
 # ============================================================
 
-question = st.session_state.pending_question
+question = (
+    st.session_state.pending_question
+)
 
 
 # ============================================================
-# PROCESS QUESTION
+# 13. PROCESS QUESTION
 # ============================================================
 
 if question:
@@ -416,31 +463,31 @@ if question:
 
 
     # --------------------------------------------------------
-    # AUTOMATIC CONTEXT EXTRACTION
+    # Automatic context extraction
     # --------------------------------------------------------
 
     detected_context, retrieval_query = (
         build_context_query(
             question,
-            sidebar_context
+            sidebar_context,
         )
     )
 
 
     # --------------------------------------------------------
-    # STORE USER MESSAGE
+    # Store user message
     # --------------------------------------------------------
 
     st.session_state.messages.append(
         {
             "role": "user",
-            "content": question
+            "content": question,
         }
     )
 
 
     # --------------------------------------------------------
-    # SHOW USER QUESTION
+    # Show user message
     # --------------------------------------------------------
 
     with st.chat_message("user"):
@@ -451,7 +498,7 @@ if question:
 
 
     # --------------------------------------------------------
-    # ASSISTANT
+    # Assistant
     # --------------------------------------------------------
 
     with st.chat_message("assistant"):
@@ -459,7 +506,7 @@ if question:
         try:
 
             # =================================================
-            # DETECTED CONTEXT
+            # CONTEXT
             # =================================================
 
             st.subheader(
@@ -473,11 +520,10 @@ if question:
 
 
             # -------------------------------------------------
-            # First row
+            # Context row 1
             # -------------------------------------------------
 
             c1, c2, c3 = st.columns(3)
-
 
             with c1:
 
@@ -486,7 +532,7 @@ if question:
                     detected_context.get(
                         "crop"
                     )
-                    or "Not specified"
+                    or "Not specified",
                 )
 
 
@@ -497,7 +543,7 @@ if question:
                     detected_context.get(
                         "growth_stage"
                     )
-                    or "Not specified"
+                    or "Not specified",
                 )
 
 
@@ -508,16 +554,15 @@ if question:
                     detected_context.get(
                         "intent"
                     )
-                    or "General"
+                    or "General",
                 )
 
 
             # -------------------------------------------------
-            # Second row
+            # Context row 2
             # -------------------------------------------------
 
             c4, c5 = st.columns(2)
-
 
             with c4:
 
@@ -526,7 +571,7 @@ if question:
                     detected_context.get(
                         "irrigation_method"
                     )
-                    or "Not specified"
+                    or "Not specified",
                 )
 
 
@@ -537,7 +582,7 @@ if question:
                     detected_context.get(
                         "water_availability"
                     )
-                    or "Not specified"
+                    or "Not specified",
                 )
 
 
@@ -554,7 +599,7 @@ if question:
 
                 results = search(
                     retrieval_query,
-                    top_k=3
+                    top_k=3,
                 )
 
 
@@ -568,7 +613,6 @@ if question:
                     "⚠️ I couldn't find sufficiently relevant "
                     "information in the indexed documents."
                 )
-
 
                 answer = (
                     KNOWLEDGE_GAP_MESSAGE
@@ -593,12 +637,18 @@ if question:
                     answer = generate_answer(
                         retrieval_query,
                         results,
-                        language=language
+                        language=language,
                     )
 
 
-                knowledge_gap = is_knowledge_gap(
-                    answer
+                # =================================================
+                # KNOWLEDGE GAP
+                # =================================================
+
+                knowledge_gap = (
+                    is_knowledge_gap(
+                        answer
+                    )
                 )
 
 
@@ -628,8 +678,10 @@ if question:
                 # VERIFIED SOURCES
                 # =================================================
 
-                sources = get_verified_sources(
-                    results
+                sources = (
+                    get_verified_sources(
+                        results
+                    )
                 )
 
 
@@ -656,7 +708,6 @@ if question:
                             st.markdown(
                                 f"📄 **{source['document']}**"
                             )
-
 
                             metadata = (
                                 f"Page {source['page']} "
@@ -692,13 +743,12 @@ if question:
 
                     for i, result in enumerate(
                         results,
-                        start=1
+                        start=1,
                     ):
 
                         st.markdown(
                             f"### Evidence {i}"
                         )
-
 
                         st.caption(
                             f"{result.get('document', 'Unknown document')} "
@@ -707,14 +757,12 @@ if question:
                             f"{result.get('section') or 'General content'}"
                         )
 
-
                         st.write(
                             result.get(
                                 "text",
-                                ""
+                                "",
                             )
                         )
-
 
                         if i < len(results):
 
@@ -744,8 +792,26 @@ if question:
 
                     st.code(
                         retrieval_query,
-                        language="text"
+                        language="text",
                     )
+
+
+                    st.write(
+                        f"Retrieved passages: "
+                        f"{len(results)}"
+                    )
+
+
+                    for i, result in enumerate(
+                        results,
+                        start=1,
+                    ):
+
+                        st.write(
+                            f"{i}. "
+                            f"{result.get('document', 'Unknown')} "
+                            f"(Page {result.get('page', 'Unknown')})"
+                        )
 
 
             # =================================================
@@ -755,7 +821,7 @@ if question:
             st.session_state.messages.append(
                 {
                     "role": "assistant",
-                    "content": answer
+                    "content": answer,
                 }
             )
 
@@ -772,7 +838,7 @@ if question:
 
 
 # ============================================================
-# EMPTY STATE
+# 14. EMPTY STATE
 # ============================================================
 
 if not st.session_state.messages:
@@ -802,7 +868,7 @@ if not st.session_state.messages:
 
 
 # ============================================================
-# FOOTER
+# 15. FOOTER
 # ============================================================
 
 st.divider()
@@ -817,5 +883,5 @@ st.markdown(
         Retrieval-Augmented Generation
     </div>
     """,
-    unsafe_allow_html=True
-)   
+    unsafe_allow_html=True,
+)
