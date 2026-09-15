@@ -1,0 +1,23 @@
+# Virtual environment
+venv/
+.venv/
+
+# Secrets
+.env
+*.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local Hugging Face/cache files
+.cache/
+.cache_huggingface/
+huggingface/
